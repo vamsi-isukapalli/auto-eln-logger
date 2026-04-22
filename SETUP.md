@@ -65,7 +65,7 @@ Recommended contents:
 ```bash
 export ELABFTW_URL="https://HOST:3148" #get this from ADMIN
 export ELABFTW_TOKEN="YOUR_OWN_API_TOKEN"
-export ELABFTW_VERIFY_SSL="false"
+export ELABFTW_VERIFY_SSL="false" # set to true if your server has a valid signed certificate
 export ELABFTW_TIMEOUT="30"
 export REAL_SBATCH="/usr/bin/sbatch"
 
