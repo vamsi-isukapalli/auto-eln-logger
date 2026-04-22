@@ -63,7 +63,7 @@ Edit:
 Recommended contents:
 
 ```bash
-export ELABFTW_URL="https://10.153.70.15:3148"
+export ELABFTW_URL="https://HOST:3148" #get this from ADMIN
 export ELABFTW_TOKEN="YOUR_OWN_API_TOKEN"
 export ELABFTW_VERIFY_SSL="false"
 export ELABFTW_TIMEOUT="30"
