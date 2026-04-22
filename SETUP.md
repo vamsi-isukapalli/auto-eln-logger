@@ -139,7 +139,7 @@ python3 /path/to/your/install/api/elabftw_client.py
 Expected output:
 
 ```text
-Connecting to: https://10.153.70.15:3148/api/v2
+Connecting to: https://SERVER_IP:3148/api/v3
 ✅ Connection OK
 ```
 
