@@ -10,8 +10,11 @@ __pycache__/
 
 # State and logs
 .bmdeln/
-*.tar.gz
 *.log
+
+# Release artifacts
+*.tar.gz
+*.zip
 
 # Editor
 *.swp

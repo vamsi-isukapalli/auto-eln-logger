@@ -1,258 +1,161 @@
-# auto-eln-logger
+# BMDELN — BMD eLabFTW Logger
 
-**Automatic Electronic Lab Notebook logging for computational chemistry HPC clusters.**
+BMDELN is a workflow-aware Slurm logger that creates and updates eLabFTW entries for jobs submitted on **BMDCluster**, while the eLabFTW server itself runs on **BMDPC2**.
 
-Integrates [Slurm](https://slurm.schedmd.com/) job submission with [eLabFTW](https://www.elabftw.net/) by automatically parsing QC code input/output files and logging all calculation metadata — with zero extra effort from researchers.
+The current design supports:
 
-Developed for the **AK Fingerhut group, LMU Munich** (theoretical and computational chemistry).
+- standard single-job submissions
+- sequential multi-step workflows inside one Slurm script
+- Amber-style chained stage jobs
+- script-driven loop workflows
+- Slurm array workflows
+- native eLabFTW status tracking (`Queued`, `Running`, `Success`, `Need to be redone`, `Fail`)
+- automatic upload of selected job files and cluster-path references for large files
+- hardware metadata logging for benchmarking
 
----
+## Architecture
 
-## The problem
+- **BMDPC2**: hosts the eLabFTW server and database
+- **BMDCluster**: runs `bmdsubmit`, Slurm jobs, epilog logic, parsers, and state tracking
+- **User local PC**: only needed for browser access to eLabFTW
 
-Most Electronic Lab Notebook (ELN) tools are designed for experimental groups. Computational chemistry groups need to track:
+Server-side Docker/MySQL credentials remain only on **BMDPC2**. Cluster users only need the BMDELN client code plus their own eLabFTW API token.
 
-- Input parameters (method, basis set, functional, geometry)
-- HPC job metadata (cluster, partition, nodes, walltime)
-- Results (energies, convergence, timing)
-- Provenance (which calculation fed into the next)
+## Main Components
 
-Manually logging this is unrealistic. This tool automates it entirely.
+- `bmdsubmit.py` — wrapper around `sbatch`
+- `parsers/workflow_detector.py` — inspects submit scripts and detects job structure
+- `parsers/code_detector.py` — identifies the quantum chemistry / simulation code
+- code parsers:
+  - `cp2k_parser.py`
+  - `molpro_parser.py`
+  - `orca_parser.py`
+  - `amber_parser.py`
+  - `openmolcas_parser.py`
+- `scripts/bmdeln_epilog.py` — final job update, file upload, and summary
+- `scripts/bmdeln_job_event.py` — runtime status transitions such as `Queued -> Running`
+- `api/elabftw_client.py` — eLabFTW API client
 
----
+## What BMDELN Logs
 
-## How it works
+Depending on job type, BMDELN can log:
 
-```
-Researcher runs:    bmdsubmit H2O_64.inp submit_cp2k.sh
-                              ↓
-             Parses input file → extracts metadata
-             Creates eLabFTW entry (status: Running)
-             Injects epilog into job script
-             Submits to Slurm → gets Job ID
-             Updates eLabFTW entry with Job ID
-                              ↓
-                    Job runs on cluster
-                              ↓
-             Epilog runs at job end:
-             Parses output file → extracts results
-             Updates eLabFTW entry (status: Success/Fail)
-             Uploads small files, logs paths of large files
-```
+- code and run type
+- project tag
+- Slurm metadata
+- hardware metadata (node, CPU model, sockets, cores, memory)
+- selected input / output / Slurm files
+- workflow stages or array progress
+- parser-derived scientific metadata and results
 
-Researchers replace `sbatch submit.sh` with `bmdsubmit input.inp submit.sh`. Everything else is automatic.
+## eLabFTW Status Model
 
----
+BMDELN expects the following experiment statuses to exist in eLabFTW:
 
-## Supported QC codes
+1. `Running`
+2. `Success`
+3. `Need to be redone`
+4. `Fail`
+5. `Queued`
 
-| Code | Input parsing | Output parsing | Status |
-|------|--------------|----------------|--------|
-| CP2K | ✅ Full | ✅ Full | Production ready |
-| Molpro | ✅ Full | ✅ Full | Ready |
-| ORCA | 🔄 In progress | 🔄 In progress | Coming soon |
-| Amber | 🔄 In progress | 🔄 In progress | Coming soon |
-| OpenMolcas | 🔄 In progress | 🔄 In progress | Coming soon |
+The logger uses these statuses automatically:
 
----
+- `Queued` immediately after `sbatch` succeeds
+- `Running` when the job actually starts on a node
+- `Success` on successful completion
+- `Fail` on runtime failure after start
+- `Need to be redone` for parser-incomplete / manual-review cases
 
-## What gets logged automatically
+## Basic Usage
 
-**At submission:**
-- QC code, input file, project name, run type
-- Method, functional, basis set, dispersion correction
-- Cell parameters, geometry file, charge, multiplicity
-- Slurm job ID, partition, nodes, MPI tasks, requested walltime
-- Submission directory and timestamp
-
-**At completion:**
-- Job status (Success / Fail)
-- Final energy (a.u.)
-- SCF convergence, timing, code version
-- Small files uploaded to eLabFTW
-- Large files (trajectories, logs) referenced by cluster path
-
----
-
-## Requirements
-
-**On the ELN server:**
-- Docker + Docker Compose v2
-- Ubuntu 22.04 recommended
-
-**On the HPC cluster:**
-- Python 3.9+
-- `requests` library (`pip install --user requests`)
-- Slurm workload manager
-
----
-
-## Installation
-
-### 1. Deploy eLabFTW (one-time, on your group server)
+### Single-job mode
 
 ```bash
-mkdir ~/elabftw && cd ~/elabftw
-cp /path/to/auto-eln-logger/docker/docker-compose.example.yml docker-compose.yml
-
-# Edit docker-compose.yml — set your passwords and secret key
-vi docker-compose.yml
-
-# Generate a proper secret key
-docker run --rm elabftw/elabimg:latest php bin/init tools:genkey
-
-# Start eLabFTW
-docker compose up -d
-sleep 30
-docker exec elabftw-app bin/init db:install
+bmdsubmit input.inp submit.sh
 ```
 
-Open `https://localhost:3148` in your browser and register your sysadmin account.
-
-### 2. Install bmdsubmit on the cluster (each user)
+### Project-tagged submission
 
 ```bash
-# Copy the repo to the cluster
-git clone git@github.com:vamsi-isuk/auto-eln-logger.git ~/bmdeln
-cd ~/bmdeln
-bash setup.sh
-source ~/.bashrc
+bmdsubmit --project WATER-PROJECT input.inp submit.sh
 ```
 
-### 3. Configure credentials
+### Workflow / script-only mode
+
+Use this when the submit script itself determines the real inputs and outputs.
 
 ```bash
-vi ~/.bmdeln/config.env
+bmdsubmit submit.sh
 ```
+
+This is the preferred mode for:
+
+- loop workflows
+- scripts that move across many directories
+- Slurm arrays
+- scripts where the real input file names are generated or chosen internally
+
+### Help
 
 ```bash
-export ELABFTW_URL="https://YOUR_SERVER_IP:3148"
-export ELABFTW_TOKEN="your-api-token-from-elabftw"
+bmdsubmit --help
 ```
 
-```bash
-echo 'source ~/.bmdeln/config.env' >> ~/.bashrc
-source ~/.bashrc
-```
+Running `bmdsubmit` with no arguments also prints usage instructions.
 
-### 4. Test connectivity
+## Supported Workflow Patterns
 
-```bash
-python3 ~/bmdeln/api/elabftw_client.py
-# Should print: ✅ Connection OK
-```
+### 1. Standard single job
+One submit script runs one main calculation.
 
----
+### 2. Sequential multi-step job
+Example: Amber equilibration with `equi_01`, `equi_02`, `equi_03`, `equi_04` inside one Slurm script.
 
-## Usage
+### 3. Loop workflow
+Example: one submitter loops through many directories and runs one calculation per directory.
 
-```bash
-# Navigate to your calculation directory
-cd /path/to/my/calculation
+### 4. Array workflow
+Example: `#SBATCH --array=1-663` with task-specific folder names inferred from a mapping file or shell logic.
 
-# Instead of:
-sbatch submit_cp2k.sh
+## File Upload Policy
 
-# Run:
-bmdsubmit H2O_64.inp submit_cp2k.sh
-```
+BMDELN tries to avoid flooding entries with unrelated files.
 
-Output:
-```
-[2026-03-30 13:29:33] Detected QC code: CP2K
-[2026-03-30 13:29:33] Parsed CP2K input: project=H2O-64, run_type=MD
-[2026-03-30 13:29:36] Created eLabFTW entry: ID=7
-Submitted batch job 181929
-[2026-03-30 13:29:36] Updated eLabFTW entry 7 with Slurm Job ID 181929
-```
+### Always upload when available
 
-The entry appears immediately in your eLabFTW dashboard, tagged with code, run type, partition, and username. When the job finishes, the entry updates automatically with results.
+- the main input file or submit script
+- the main output/log file
+- the Slurm stdout/stderr file
 
----
+### Upload only when small and job-specific
 
-## Accessing the ELN
+- coordinate files
+- small restart files
+- selected auxiliary text files
 
-The ELN web interface is accessible via SSH tunnel from anywhere:
+### Do not blindly upload
 
-```bash
-# From your laptop
-ssh -L 3148:YOUR_SERVER_IP:3148 username@hpc-cluster
-```
+- unrelated files in the same directory
+- large trajectory or binary files
+- broad `*.xyz` directory sweeps
 
-Then open `https://localhost:3148` in your browser.
+Large files are referenced in the ELN entry by cluster path instead of being uploaded.
 
----
+## Current Known Limitations
 
-## Repository structure
+- pending-job cancellation before job start is **not** reconciled automatically
+- highly dynamic Bash workflows may still need conventions or future detector improvements
+- array / workflow handling is summary-oriented and aims for **one ELN entry per overall workflow**, not one entry per subtask
 
-```
-auto-eln-logger/
-├── bmdsubmit.py              # Main wrapper — replaces sbatch
-├── setup.sh                  # One-time install script
-├── parsers/
-│   ├── cp2k_parser.py        # CP2K input + output parser
-│   ├── molpro_parser.py      # Molpro input + output parser
-│   └── code_detector.py      # Detects QC code from job script
-├── api/
-│   └── elabftw_client.py     # eLabFTW REST API client
-├── scripts/
-│   └── bmdeln_epilog.py      # Runs at job completion
-├── docker/
-│   └── docker-compose.example.yml  # eLabFTW deployment template
-├── examples/
-│   ├── cp2k/                 # CP2K sample input files
-│   └── molpro/               # Molpro sample input files
-└── SETUP_GUIDE.txt           # Detailed setup guide for group members
-```
+## Recommended Testing Order
 
----
+1. `bmdsubmit --help`
+2. one CP2K single job
+3. one Molpro job
+4. one Amber multi-step job
+5. one script-only loop workflow
+6. one script-only array workflow
 
-## Adding new group members
+## Repo Notes
 
-1. Member registers at `https://YOUR_SERVER:3148/register.php` → selects your team
-2. Sysadmin activates their account
-3. Member generates an API key in eLabFTW settings
-4. Member installs bmdsubmit following steps 2–4 above
-
----
-
-## Funding compliance
-
-eLabFTW provides cryptographic timestamping of all entries, satisfying DFG and EU Horizon audit trail requirements. For long-term archiving and DOI minting, integration with [NOMAD](https://nomad-lab.eu) is planned.
-
----
-
-## Roadmap
-
-- [ ] ORCA parser
-- [ ] Amber parser
-- [ ] OpenMolcas parser
-- [ ] NOMAD push script for archiving at publication
-- [ ] Cancelled/timed-out job detection via cron checker
-- [ ] Group member onboarding automation
-
----
-
-## Citation
-
-If you use this tool in your research, please cite it via the GitHub repository:
-
-```
-Isukapalli, S.V. (2026). auto-eln-logger: Automatic ELN logging for
-computational chemistry HPC clusters. AK Fingerhut, LMU Munich.
-https://github.com/vamsi-isuk/auto-eln-logger
-```
-
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-## Contact
-
-**Sai Vamsikrishna Isukapalli**
-AK Fingerhut, Department of Chemistry, LMU Munich
-vamispc@cup.uni-muenchen.de
+This codebase is the **client-side logger**. The eLabFTW server deployment is separate and stays on BMDPC2.

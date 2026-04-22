@@ -1,328 +1,168 @@
-═══════════════════════════════════════════════════════════════════════════════
-       BMD GROUP — Electronic Lab Notebook (ELN) Setup Guide
-       Fingerhut Group, LMU Munich
-       eLabFTW + Automatic Slurm Job Logging
-═══════════════════════════════════════════════════════════════════════════════
+# STEP-BY-STEP GUIDE
 
-OVERVIEW
-────────
-This system automatically logs every job you submit on bmdcluster into
-our group's Electronic Lab Notebook (eLabFTW). You do not need to manually
-write anything — job metadata, input parameters, results, and output files
-are captured automatically.
+This guide is for deploying the ELN logger, configuring users, and extending parsers.
 
-  Instead of:   sbatch submit_cp2k.sh
-  You run:      bmdsubmit H2O_64.inp submit_cp2k.sh
+## 1. Server-side eLabFTW deployment
 
-That's the only change to your workflow.
+1. Copy `docker/docker-compose.example.yml` and `docker/.env.example` into your deployment directory.
+2. Rename `.env.example` to `.env`.
+3. Replace all placeholder secrets in `.env`.
+4. Generate an eLabFTW secret key with the container helper and paste it into `.env`.
+5. Start the stack with `docker compose up -d`.
+6. Run the eLabFTW database initialization if needed.
+7. Open the ELN in the browser and create or activate users.
 
-The ELN is accessible at:   https://10.153.70.15:3148
-(From within LMU network, or via SSH tunnel — see Section 4)
+## 2. Cluster-side installation for a user
 
+1. Copy the repo to the cluster, for example into `~/bmdeln`.
+2. Run `bash setup.sh`.
+3. Open `~/.bmdeln/config.env`.
+4. Set:
+   - `ELABFTW_URL`
+   - `ELABFTW_TOKEN`
+   - `ELABFTW_VERIFY_SSL`
+   - `ELABFTW_TIMEOUT`
+   - `REAL_SBATCH`
+5. Run `source ~/.bashrc`.
+6. Test with `python3 ~/bmdeln/api/elabftw_client.py`.
 
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 1 — FIRST-TIME SETUP (do this once)
-═══════════════════════════════════════════════════════════════════════════════
+## 3. Daily usage
 
-Step 1.1 — Register your account
-─────────────────────────────────
-  1. Set up an SSH tunnel to reach the ELN from your computer:
+Use:
 
-     On Linux/Mac terminal (or Windows PowerShell):
-       ssh -L 3148:localhost:3148 <your-username>@10.153.70.15
+```bash
+bmdsubmit input_file submit_script
+```
 
-     Keep this terminal open while using the ELN browser interface.
+instead of:
 
-  2. Open your browser and go to:
-       https://localhost:3148/register.php
+```bash
+sbatch submit_script
+```
 
-  3. Accept the certificate warning:
-     - Firefox:  click "Advanced" → "Accept the Risk and Continue"
-     - Chrome/Brave/Edge: click anywhere on the page and type:  thisisunsafe
+What happens:
+1. The wrapper detects the code from the Slurm script.
+2. The input parser extracts metadata.
+3. An eLabFTW entry is created.
+4. A temporary copy of the Slurm script is generated.
+5. The temporary script gets an auto-injected exit trap that calls `scripts/bmdeln_epilog.py`.
+6. The job is submitted through the real `sbatch`.
+7. When the job finishes, the ELN entry is updated with status, results, and attached/reference files.
 
-  4. Fill in the registration form:
-     - Email:      your LMU email (e.g. yourname@cup.uni-muenchen.de)
-     - First name, Last name
-     - Password:   choose a strong password (unrelated to cluster password)
-     - Team:       select "AK Fingerhut"
+## 4. What changed in this revision
 
-  5. After registering, contact Vamsi (vamispc@cup.uni-muenchen.de) to
-     activate your account. You cannot log in until activation.
+- `sbatch` is no longer hardcoded.
+- eLabFTW config is fully environment-driven.
+- request timeouts are enforced in the API client.
+- failed file uploads now raise errors instead of silently passing.
+- epilog injection uses a shell exit trap instead of a simple appended command.
+- Molpro is wired into the full submit → epilog flow.
+- ORCA, Amber, and OpenMolcas now have first-pass input and output parsers.
+- large-file path sections in the ELN body are inserted idempotently.
+- secrets are removed from the Docker example and moved to `.env`.
 
+## 5. Parser extension model
 
-Step 1.2 — Get your API token
-──────────────────────────────
-  1. Log in to the ELN at https://localhost:3148
-  2. Click your initials in the top-right corner → Settings
-  3. Click the "API KEYS" tab
-  4. In the Name field, type:  bmdsubmit-cluster
-  5. Set Permissions to:  Read/Write
-  6. Click "Generate an API Key"
-  7. COPY THE TOKEN — you will not see it again after closing this page
-  8. Save it somewhere temporarily (you'll paste it in Step 1.3)
+Every parser module under `parsers/` now exposes four important items:
 
+- `JOB_LABELS`
+- `RESULT_LABELS`
+- `TAG_FIELDS`
+- `FILE_FIELDS`
 
-Step 1.3 — Install bmdsubmit on the cluster
-─────────────────────────────────────────────
-  SSH into bmdcluster and run:
+### 5.1 Add a new field to the parser
 
-    cd ~
-    cp /opt/bmdsw/bmdeln/bmdeln.tar.gz ~/
-    tar -xzf ~/bmdeln.tar.gz
-    bash ~/bmdeln/setup.sh
-    source ~/.bashrc
+Add the field to the dictionary returned by the input or output parser.
 
-  You should see:
-    ✅ Python3 found
-    ✅ Dependencies installed
-    ✅ bmdsubmit installed at /home/<you>/.local/bin/bmdsubmit
+Example:
 
+```python
+metadata['solvent'] = parsed_value
+```
 
-Step 1.4 — Configure your credentials
-───────────────────────────────────────
-  On bmdcluster:
+### 5.2 Show the field in the ELN body
 
-    vi ~/.bmdeln/config.env
+Add one tuple to `JOB_LABELS` or `RESULT_LABELS` in that parser module.
 
-  Add these two lines (replace YOUR_TOKEN_HERE with the token from Step 1.2):
+Example:
 
-    export ELABFTW_URL="https://10.153.70.15:3148"
-    export ELABFTW_TOKEN="YOUR_TOKEN_HERE"
+```python
+('Solvent', 'solvent')
+```
 
-  Save and exit (:wq), then:
+The shared formatter in `parsers/common.py` will then render it automatically.
 
-    source ~/.bmdeln/config.env
+### 5.3 Turn a field into an ELN tag
 
-  Add this to your ~/.bashrc so it loads automatically:
+Add the field name to `TAG_FIELDS`.
 
-    echo 'source ~/.bmdeln/config.env' >> ~/.bashrc
+Example:
 
+```python
+TAG_FIELDS = ['job_type', 'functional', 'solvent']
+```
 
-Step 1.5 — Verify the connection
-──────────────────────────────────
-    python3 ~/bmdeln/api/elabftw_client.py
-
-  You should see:
-    ✅ Connection OK
-
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 2 — DAILY USAGE
-═══════════════════════════════════════════════════════════════════════════════
-
-Submitting a CP2K job
-──────────────────────
-  Navigate to your calculation directory (which contains your .inp file
-  and your Slurm submit script), then:
-
-    bmdsubmit <input_file.inp> <submit_script.sh>
-
-  Example:
-    cd ~/cp2k/my-project/calc-01
-    bmdsubmit H2O_64.inp cp2k_slurm_impi.sh
-
-  You will see output like:
-    [2026-03-29 18:49:28] Detected QC code: CP2K
-    [2026-03-29 18:49:28] Parsed CP2K input: project=H2O-64, run_type=MD
-    [2026-03-29 18:49:29] Created eLabFTW entry: ID=3
-    Submitted batch job 181811
-
-  The job runs exactly as before. When it finishes, the ELN entry is
-  automatically updated with the results and output files.
-
-What gets logged automatically
-───────────────────────────────
-  At submission:
-  • Project name, run type (MD / GEO_OPT / ENERGY)
-  • Functional, basis set, HFX fraction, VdW correction, ADMM
-  • Cell parameters, coordinate file
-  • Charge, multiplicity, SCF guess
-  • MD settings (ensemble, steps, timestep, temperature)
-  • Slurm job ID, partition, nodes, MPI tasks, requested walltime
-  • Submission directory and timestamp
-
-  At completion:
-  • Job status (SUCCESS / FAIL)
-  • Final energy (a.u.)
-  • SCF convergence
-  • Total runtime
-  • CP2K version
-  • Input file attached
-  • Output log attached
-  • Coordinate file attached
-
-Viewing your entries
-─────────────────────
-  1. Open the SSH tunnel (see Section 4)
-  2. Go to https://localhost:3148
-  3. Click "Experiments" in the top menu
-  4. All your logged calculations appear here, tagged by code, run type,
-     partition, and your username
-
-Non-CP2K jobs (ORCA, Amber, Molpro)
-──────────────────────────────────────
-  If you submit a non-CP2K job using bmdsubmit, it will still be logged
-  but with a warning that full parsing is not yet supported. The entry
-  will be marked "Need to be redone" as a reminder to annotate manually.
-  Parsers for other codes will be added in future versions.
-
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 3 — ADMIN TASKS (Vamsi only)
-═══════════════════════════════════════════════════════════════════════════════
-
-Activating a new user account
-───────────────────────────────
-  After a group member registers, activate their account:
-
-    sudo docker exec elabftw-mysql mysql -u elabftw -p81377 elabftw \
-      -e "UPDATE users SET validated=1 WHERE email='newuser@cup.uni-muenchen.de';"
-
-  Or from the ELN web interface:
-    Sysadmin panel (top-right initials → Sysconfig) → USERS tab → validate
-
-Starting/stopping eLabFTW
-───────────────────────────
-  On BMDPC2:
-
-    cd ~/elabftw
-    sudo docker compose up -d       # start
-    sudo docker compose down        # stop
-    sudo docker compose restart     # restart
-
-Checking status
-────────────────
-    sudo docker ps
-    sudo docker compose logs --tail=50 elabftw
-
-Backup
-───────
-    cd ~/elabftw
-    sudo docker run --rm \
-      -v elabftw_elabftw-data:/data \
-      -v $(pwd):/backup \
-      ubuntu tar czf /backup/elabftw-backup-$(date +%Y%m%d).tar.gz /data
-
-    sudo docker exec elabftw-mysql mysqldump \
-      -u elabftw -p81377 elabftw > elabftw-db-$(date +%Y%m%d).sql
-
-Copying bmdeln to a shared location (when ready for all users)
-────────────────────────────────────────────────────────────────
-  Once tested, place the package in a shared location on the cluster
-  so all users can install from there:
-
-    sudo cp ~/bmdeln.tar.gz /opt/bmdsw/bmdeln/bmdeln.tar.gz
-
-  Then each user runs:
-    cp /opt/bmdsw/bmdeln/bmdeln.tar.gz ~/
-    tar -xzf ~/bmdeln.tar.gz
-    bash ~/bmdeln/setup.sh
-
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 4 — ACCESSING THE ELN WEB INTERFACE
-═══════════════════════════════════════════════════════════════════════════════
-
-The ELN runs on BMDPC2 (10.153.70.15) which is on the LMU network.
-You need to be on the LMU network or use an SSH tunnel to access it.
-
-Option A — From within LMU (on campus or LRZ VPN)
-────────────────────────────────────────────────────
-  Open your browser and go directly to:
-    https://10.153.70.15:3148
-
-  Accept the certificate warning as described in Section 1.1 Step 3.
-
-Option B — From outside LMU (home, travel)
-────────────────────────────────────────────
-  Step 1: Connect to LRZ VPN (eduVPN or Cisco AnyConnect)
-           https://www.lrz.de/services/netz/vpn/
-
-  Step 2: Then access https://10.153.70.15:3148 directly in your browser
-
-Option C — SSH tunnel (always works, no VPN needed)
-──────────────────────────────────────────────────────
-  This works from anywhere as long as you can SSH to the cluster.
-
-  On Linux/Mac:
-    ssh -L 3148:10.153.70.15:3148 <your-username>@bmdcluster
-
-  On Windows (PowerShell or Command Prompt):
-    ssh -L 3148:10.153.70.15:3148 <your-username>@bmdcluster
-
-  Keep that terminal open, then go to:
-    https://localhost:3148
-
-  Note: You can also tunnel directly to BMDPC2 if you have SSH access:
-    ssh -L 3148:localhost:3148 vamsi@10.153.70.15
-
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 5 — TROUBLESHOOTING
-═══════════════════════════════════════════════════════════════════════════════
-
-"bmdsubmit: command not found"
-  → Run:  source ~/.bashrc
-  → Check:  which bmdsubmit
-  → If missing:  export PATH="$HOME/.local/bin:$PATH"
-
-"Connection failed: SSL certificate error"
-  → The VERIFY_SSL flag should be False in elabftw_client.py
-  → Check:  grep VERIFY_SSL ~/bmdeln/api/elabftw_client.py
-
-"eLabFTW API error 401"
-  → Your token is wrong or expired
-  → Generate a new API key in the ELN and update ~/.bmdeln/config.env
-
-"Job submitted but no ELN entry created"
-  → Check the log:  cat ~/.bmdeln/bmdsubmit.log
-  → Check connectivity:  python3 ~/bmdeln/api/elabftw_client.py
-
-"Entry shows RUNNING after job finished"
-  → The epilog script may have failed
-  → Check:  cat ~/.bmdeln/epilog.log
-  → The epilog runs at job end — check if the output file name matches
-    what CP2K actually produces (should be <project>.log)
-
-"Entry shows FAIL but job completed successfully"
-  → CP2K may have used a different output filename
-  → Check the output file exists:  ls *.log in your calc directory
-  → The parser looks for terminated_normally marker in the log
-
-
-═══════════════════════════════════════════════════════════════════════════════
-SECTION 6 — FILE STRUCTURE ON CLUSTER
-═══════════════════════════════════════════════════════════════════════════════
-
-~/bmdeln/
-├── bmdsubmit.py              ← main wrapper (replaces sbatch)
-├── setup.sh                  ← one-time install script
-├── parsers/
-│   ├── cp2k_parser.py        ← parses CP2K input + output files
-│   └── code_detector.py      ← detects QC code from job script
-├── api/
-│   └── elabftw_client.py     ← eLabFTW REST API client
-└── scripts/
-    └── bmdeln_epilog.py      ← runs at job completion
-
-~/.bmdeln/
-├── config.env                ← your personal ELN URL + API token
-├── bmdsubmit.log             ← submission log (check if issues arise)
-├── epilog.log                ← completion log
-└── jobs/
-    └── <jobid>.json          ← per-job state (auto-cleaned after completion)
-
-~/.local/bin/
-└── bmdsubmit                 ← launcher script (on your PATH)
-
-
-═══════════════════════════════════════════════════════════════════════════════
-CONTACT
-═══════════════════════════════════════════════════════════════════════════════
-
-For issues with the ELN system, contact:
-  Vamsi — vamispc@cup.uni-muenchen.de
-
-ELN server:   BMDPC2 (10.153.70.15), port 3148
-eLabFTW docs: https://doc.elabftw.net
-═══════════════════════════════════════════════════════════════════════════════
+### 5.4 Treat a parsed path as a referenced file
+
+Add the field name to `FILE_FIELDS`.
+
+Example:
+
+```python
+FILE_FIELDS = ['geometry_file', 'orbital_file', 'trajectory_file']
+```
+
+The epilog will then try to upload small files and list larger ones as cluster paths.
+
+## 6. Parser-specific notes
+
+### CP2K
+- coordinate files are pulled from `COORD_FILE_NAME`
+- standard CP2K log patterns are used for final energy and convergence
+
+### Molpro
+- input and output parsing are integrated end-to-end
+- method energies and HOMO/LUMO style information are captured when present
+
+### ORCA
+- supports standard `!` keyword parsing, `xyzfile`, `%qmmm`, and `%neb`
+- the output parser currently focuses on final energies, SCF convergence, and orbital energies
+
+### Amber
+- the input parser reads `&cntrl` parameters from `mdin`
+- the output parser reads final thermo blocks, averages, wall time, and performance summary
+
+### OpenMolcas
+- the parser currently targets `&GATEWAY`, `&SEWARD`, and `&RASSCF` workflows
+- root energies and the `Happy landing!` marker are captured from the output
+
+## 7. Release hygiene
+
+When you share a release, do not zip your full working directory. Use one of these instead:
+
+```bash
+git archive --format=zip HEAD -o auto-eln-logger-release.zip
+```
+
+or
+
+```bash
+tar --exclude-vcs --exclude='__pycache__' --exclude='*.tar.gz' --exclude='*.zip' -czf auto-eln-logger-release.tar.gz auto-eln-logger/
+```
+
+## 8. Recommended next validation
+
+Before group-wide rollout, test one successful job for each supported code using the sample-style workflows you already collected:
+
+- CP2K
+- Molpro
+- ORCA
+- Amber
+- OpenMolcas
+
+Then check:
+1. correct code detection
+2. correct output file guess
+3. correct status on completion
+4. attached files versus cluster-path references
+5. sensible ELN tags

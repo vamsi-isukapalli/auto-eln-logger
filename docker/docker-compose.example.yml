@@ -1,17 +1,16 @@
 version: '3'
 
 services:
-
   mysql:
     image: mysql:8.0
     container_name: elabftw-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: YOUR_PASSWORD
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: elabftw
       MYSQL_USER: elabftw
-      MYSQL_PASSWORD: YOUR_PASSWORD
-      TZ: "Europe/Berlin"
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: ${TZ:-Europe/Berlin}
     volumes:
       - mysql-data:/var/lib/mysql
     networks:
@@ -24,19 +23,19 @@ services:
     depends_on:
       - mysql
     ports:
-      - "3148:443"
+      - '3148:443'
     environment:
       DB_HOST: mysql
       DB_PORT: 3306
       DB_NAME: elabftw
       DB_USER: elabftw
-      DB_PASSWORD: YOUR_DB_PASSWORD 
-      SECRET_KEY: "YOUR_SECRET_KEY"
-      SERVER_NAME: localhost
-      DISABLE_HTTPS: "false"
-      ENABLE_LETSENCRYPT: "false"
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      SECRET_KEY: ${ELABFTW_SECRET_KEY}
+      SERVER_NAME: ${SERVER_NAME:-localhost}
+      DISABLE_HTTPS: 'false'
+      ENABLE_LETSENCRYPT: 'false'
       MAX_UPLOAD_SIZE: 500m
-      TZ: "Europe/Berlin"
+      TZ: ${TZ:-Europe/Berlin}
     volumes:
       - elabftw-data:/elabftw/uploads
     networks:

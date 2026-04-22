@@ -1,100 +1,69 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────
-# BMD ELN Logger — setup script
-# Run once as user 'vamsi' to install for single-user prototype
-# ─────────────────────────────────────────────────────────────
+set -euo pipefail
 
-set -e
-
-INSTALL_DIR="$HOME/bmdeln"
+INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
+CONFIG_DIR="$HOME/.bmdeln"
+CONFIG_FILE="$CONFIG_DIR/config.env"
+REAL_SBATCH_PATH="$(command -v sbatch || true)"
 
-echo "=== BMD ELN Logger Setup ==="
-echo "Install dir: $INSTALL_DIR"
-echo "Bin dir:     $BIN_DIR"
-echo ""
+printf '=== BMD ELN Logger Setup ===\n'
+printf 'Install dir: %s\n' "$INSTALL_DIR"
+printf 'Bin dir:     %s\n\n' "$BIN_DIR"
 
-# ── 1. Check Python ──────────────────────────────────────────
-python3 --version >/dev/null 2>&1 || { echo "ERROR: python3 not found"; exit 1; }
-echo "✅ Python3 found: $(python3 --version)"
+python3 --version >/dev/null 2>&1 || { echo 'ERROR: python3 not found'; exit 1; }
+printf '✅ Python3 found: %s\n' "$(python3 --version 2>&1)"
 
-# ── 2. Install Python deps ───────────────────────────────────
-echo ""
-echo "Installing Python dependencies..."
-pip3 install --user requests
-echo "✅ Dependencies installed"
+printf '\nInstalling Python dependency requests...\n'
+pip3 install --user requests >/dev/null
+printf '✅ Dependencies installed\n'
 
-# ── 3. Create state directory ────────────────────────────────
-mkdir -p "$HOME/.bmdeln/jobs"
-echo "✅ State directory created: $HOME/.bmdeln/"
+mkdir -p "$CONFIG_DIR/jobs" "$BIN_DIR"
+printf '✅ State directory created: %s\n' "$CONFIG_DIR"
 
-# ── 4. Create bin dir and symlink ────────────────────────────
-mkdir -p "$BIN_DIR"
-
-# Create the bmdsubmit launcher
-cat > "$BIN_DIR/bmdsubmit" << EOF
+cat > "$BIN_DIR/bmdsubmit" <<EOF
 #!/usr/bin/env bash
 exec python3 "$INSTALL_DIR/bmdsubmit.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/bmdsubmit"
-echo "✅ bmdsubmit installed at $BIN_DIR/bmdsubmit"
+printf '✅ bmdsubmit installed at %s/bmdsubmit\n' "$BIN_DIR"
 
-# ── 5. Check PATH ────────────────────────────────────────────
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    echo ""
-    echo "⚠️  Add this to your ~/.bashrc:"
-    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo ""
-    # Auto-add if .bashrc exists
-    if [ -f "$HOME/.bashrc" ]; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-        echo "✅ Added to ~/.bashrc (run: source ~/.bashrc)"
-    fi
+  if ! grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+  fi
+  printf '✅ Added ~/.local/bin to ~/.bashrc\n'
 fi
 
-# ── 6. Config file ───────────────────────────────────────────
-CONFIG_FILE="$HOME/.bmdeln/config.env"
-if [ ! -f "$CONFIG_FILE" ]; then
-    cat > "$CONFIG_FILE" << 'EOF'
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  cat > "$CONFIG_FILE" <<EOF
 # BMD ELN Logger configuration
-# Source this file or set these variables in your ~/.bashrc
-
-# eLabFTW server URL (update once deployed)
-export ELABFTW_URL="https://elab.bmdgroup.lmu.de"
-
-# Your personal eLabFTW API token (get from eLabFTW → Profile → API Keys)
+export ELABFTW_URL="https://your-elab-host:3148"
 export ELABFTW_TOKEN=""
-
-# Path to real sbatch binary (verify this is correct on your cluster)
-# export REAL_SBATCH="/usr/bin/sbatch"
+export ELABFTW_VERIFY_SSL="true"
+export ELABFTW_TIMEOUT="30"
+export ELABFTW_STATUS_RUNNING="1"
+export ELABFTW_STATUS_SUCCESS="2"
+export ELABFTW_STATUS_REDO="3"
+export ELABFTW_STATUS_FAIL="4"
+export BMDELN_DEFAULT_PROJECT=""
+export REAL_SBATCH="${REAL_SBATCH_PATH:-/usr/bin/sbatch}"
 EOF
-    echo "✅ Config template created: $CONFIG_FILE"
-    echo ""
-    echo "⚠️  IMPORTANT: Edit $CONFIG_FILE and set:"
-    echo "    ELABFTW_URL   — your eLabFTW server URL"
-    echo "    ELABFTW_TOKEN — your personal API token from eLabFTW"
-    echo ""
-    echo "   Then add to ~/.bashrc:"
-    echo "    source $HOME/.bmdeln/config.env"
+  printf '✅ Config template created: %s\n' "$CONFIG_FILE"
+else
+  printf 'ℹ️  Existing config preserved: %s\n' "$CONFIG_FILE"
 fi
 
-# ── 7. Verify real sbatch path ────────────────────────────────
-SBATCH_PATH=$(which sbatch 2>/dev/null || echo "not found")
-echo "ℹ️  Current sbatch path: $SBATCH_PATH"
-if [ "$SBATCH_PATH" != "not found" ]; then
-    REAL_SBATCH=$(readlink -f "$SBATCH_PATH")
-    echo "ℹ️  Real sbatch resolves to: $REAL_SBATCH"
-    echo "   Make sure REAL_SBATCH in bmdsubmit.py matches this."
+if ! grep -Fq 'source ~/.bmdeln/config.env' "$HOME/.bashrc" 2>/dev/null; then
+  echo 'source ~/.bmdeln/config.env' >> "$HOME/.bashrc"
+  printf '✅ Added config loader to ~/.bashrc\n'
 fi
 
-echo ""
-echo "=== Setup complete ==="
-echo ""
-echo "Next steps:"
-echo "  1. source ~/.bashrc"
-echo "  2. Edit ~/.bmdeln/config.env with your eLabFTW URL and token"
-echo "  3. source ~/.bmdeln/config.env"
-echo "  4. Test with: bmdsubmit H2O_64.inp submit_cp2k.sh"
-echo ""
-echo "Instead of:  sbatch submit_cp2k.sh"
-echo "Now run:     bmdsubmit H2O_64.inp submit_cp2k.sh"
+printf '\nCurrent sbatch path: %s\n' "${REAL_SBATCH_PATH:-not found}"
+printf '\nNext steps:\n'
+printf '  1. Edit %s\n' "$CONFIG_FILE"
+printf '  2. Set ELABFTW_URL and ELABFTW_TOKEN\n'
+printf '  3. Run: source ~/.bashrc\n'
+printf '  4. Test: python3 %s/api/elabftw_client.py\n' "$INSTALL_DIR"
+printf '  5. Optional project tag: bmdsubmit --project <project> <input> <script>\n'
+printf '  6. Submit jobs with: bmdsubmit <input> <script>\n'

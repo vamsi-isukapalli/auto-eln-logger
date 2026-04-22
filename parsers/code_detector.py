@@ -1,29 +1,40 @@
-"""
-Detect which QC code a job script is using.
-Used to warn about non-CP2K jobs in eLabFTW.
-"""
+"""Detect which QC/MD code a Slurm job script is using."""
+
+from __future__ import annotations
 
 import re
+from pathlib import Path
 
-# Map of known codes to patterns found in job scripts
 CODE_SIGNATURES = {
-    "ORCA":     [r"orca\s", r"/Orca/", r"\.orca\b", r"orca\.inp"],
-    "Amber":    [r"sander", r"pmemd", r"amber", r"\.prmtop", r"\.inpcrd"],
-    "Molpro":   [r"molpro", r"\.com\b.*molpro"],
-    "NWChem":   [r"nwchem"],
-    "OpenMolcas":[r"pymolcas", r"molcas"],
-    "xTB":      [r"\bxtb\b"],
-    "CP2K":     [r"cp2k", r"cp2k\.popt", r"cp2k\.psmp"],
+    'OpenMolcas': [r'\bpymolcas(?:_\d+)?\b', r'\bopenmolcas\b', r'\bmolcas\b'],
+    'ORCA': [r'\borca\b', r'orca_\d', r'\.orc\b', r'\.inp\b.*\borca\b'],
+    'Amber': [r'\bpmemd\b', r'\bsander\b', r'\.parm7\b', r'\.prmtop\b', r'\.inpcrd\b', r'\bamber\b'],
+    'Molpro': [r'\bmolpro\b', r'\.com\b'],
+    'CP2K': [r'\bcp2k\b', r'cp2k\.popt', r'cp2k\.psmp'],
+    'NWChem': [r'\bnwchem\b'],
+    'xTB': [r'\bxtb\b'],
 }
 
-def detect_code(job_script_content: str) -> str:
-    """
-    Detect the QC code used in a Slurm job script.
-    Returns the code name string, or 'Unknown'.
-    """
-    text = job_script_content.lower()
+INPUT_HINTS = {
+    '.orc': 'ORCA',
+    '.mol': 'Molpro',
+    '.com': 'Molpro',
+}
+
+
+def detect_code(job_script_content: str, input_filename: str = '') -> str:
+    active_lines = []
+    for line in job_script_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        active_lines.append(stripped)
+    text = '\n'.join(active_lines).lower()
     for code, patterns in CODE_SIGNATURES.items():
-        for pat in patterns:
-            if re.search(pat, text, re.IGNORECASE):
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
                 return code
-    return "Unknown"
+    suffix = Path(input_filename).suffix.lower()
+    if suffix in INPUT_HINTS:
+        return INPUT_HINTS[suffix]
+    return 'Unknown'
