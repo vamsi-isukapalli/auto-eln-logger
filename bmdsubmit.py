@@ -176,6 +176,24 @@ def choose_project_label(input_meta: dict, submit_dir: Path, explicit_project: O
 
 def inject_epilog(script_content: str, env_map: Dict[str, str]) -> str:
     lines = script_content.splitlines()
+
+    # Rewrite user-defined EXIT traps so they chain with the BMDELN epilog
+    # instead of overriding it. This is crucial for workflow scripts that use
+    # `trap cleanup EXIT` for scratch cleanup.
+    trap_re = re.compile(r'^(?P<indent>\s*)trap\s+(?P<cmd>.+?)\s+EXIT\s*$')
+    for idx, line in enumerate(lines):
+        match = trap_re.match(line)
+        if not match:
+            continue
+        raw_cmd = match.group('cmd').strip()
+        if 'bmdeln_' in raw_cmd:
+            continue
+        if len(raw_cmd) >= 2 and raw_cmd[0] == raw_cmd[-1] and raw_cmd[0] in ('"', "'"):
+            raw_cmd = raw_cmd[1:-1]
+        indent = match.group('indent')
+        quoted_cmd = shlex.quote(raw_cmd)
+        lines[idx] = f"{indent}bmdeln_set_user_exit_trap {quoted_cmd}\n{indent}trap bmdeln_exit_chain EXIT"
+
     insert_at = 0
     if lines and lines[0].startswith('#!'):
         insert_at = 1
@@ -185,11 +203,21 @@ def inject_epilog(script_content: str, env_map: Dict[str, str]) -> str:
             insert_at += 1
             continue
         break
+
     exports = [f"export {key}={shlex.quote(value)}" for key, value in env_map.items()]
     block = [
         '',
         '# --- BMDELN AUTO-INJECTED START ---',
         *exports,
+        'bmdeln_user_exit_cmd=""',
+        'bmdeln_set_user_exit_trap() {',
+        '    bmdeln_user_exit_cmd="$1"',
+        '}',
+        'bmdeln_run_user_exit_trap() {',
+        '    if [ -n "$bmdeln_user_exit_cmd" ]; then',
+        '        eval "$bmdeln_user_exit_cmd"',
+        '    fi',
+        '}',
         'bmdeln_cancel_trap() {',
         '    export BMDELN_CANCELLED=1',
         '    exit 143',
@@ -197,10 +225,15 @@ def inject_epilog(script_content: str, env_map: Dict[str, str]) -> str:
         'trap bmdeln_cancel_trap TERM INT',
         'bmdeln_epilog_trap() {',
         '    local bmdeln_status=$?',
+        '    bmdeln_run_user_exit_trap',
         '    export BMDELN_SCRIPT_EXIT_CODE="$bmdeln_status"',
         f'    python3 {shlex.quote(EPILOG_SCRIPT)} || true',
+        '    return "$bmdeln_status"',
         '}',
-        'trap bmdeln_epilog_trap EXIT',
+        'bmdeln_exit_chain() {',
+        '    bmdeln_epilog_trap',
+        '}',
+        'trap bmdeln_exit_chain EXIT',
         f'python3 {shlex.quote(JOB_EVENT_SCRIPT)} --job-id "${{SLURM_JOB_ID:-}}" --event start || true',
         '# --- BMDELN AUTO-INJECTED END ---',
         '',
